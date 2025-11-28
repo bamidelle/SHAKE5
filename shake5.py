@@ -1,248 +1,147 @@
-"""
-TITAN - Fully functional single-file Streamlit application with live lead capture
-
-Updates:
-- Accepts new lead capture input directly via form.
-- Automatically populates the pipeline stages as leads progress.
-- Dashboard updates dynamically based on pipeline stage changes.
-- Retains CRUD, CPA, ML lead scoring, imports/exports, and reporting.
-- Fully SQLite-backed persistence.
-"""
-
 import streamlit as st
+from datetime import datetime, timedelta, date
+import random, threading, time
 import pandas as pd
-import numpy as np
-import sqlite3
-from sqlite3 import Connection
-from datetime import datetime, timedelta
-import io
-import base64
-import os
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
-import joblib
-import plotly.express as px
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, func, or_, and_
+from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
 
-# ----------------------------
-# Configuration
-# ----------------------------
-DB_FILE = 'titan_leads.db'
-MODEL_FILE = 'titan_lead_scoring.joblib'
-PIPELINE_STAGES = ['New','Contacted','Qualified','Estimate Sent','Won','Lost']
+# ---------- DATABASE SETUP ----------
+DB_PATH = "projectx.db"
+engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
+SessionLocal = scoped_session(sessionmaker(bind=engine, expire_on_commit=False))
+Base = declarative_base()
 
-st.set_page_config(page_title="TITAN - Lead Pipeline", layout='wide')
+class Lead(Base):
+    __tablename__ = "leads"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String)
+    phone = Column(String)
+    email = Column(String)
+    address = Column(String)
+    source = Column(String)
+    cost_to_acquire = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String, default="CAPTURED")
+    inspection_date = Column(DateTime, nullable=True)
+    estimate_value = Column(Float, nullable=True)
+    converted = Column(Boolean, default=False)
 
-APP_CSS = """
+Base.metadata.create_all(engine)
+
+# ---------- GLOBAL STYLING ----------
+st.markdown("""
 <style>
-body {background-color: #071129; color: #e6eef8}
-.header {display:flex; align-items:center; gap:12px}
-.metric-card {background: linear-gradient(135deg,#0ea5a0,#06b6d4); padding:14px; border-radius:10px; color:white}
-.small {font-size:12px; opacity:0.95}
-.kpi {font-size:26px; font-weight:700}
-.card-row {display:flex; gap:12px; flex-wrap:wrap}
-.table-container {background:#0b1220; padding:12px; border-radius:8px}
+@import url('https://fonts.googleapis.com/css2?family=Comfortaa:wght@300;400;700&display=swap');
+* {font-family:'Comfortaa';}
+body, .main {background:#ffffff; padding:10px;}
+.metric-card{background:black;border-radius:12px;padding:16px;margin:6px;}
+.metric-title{color:white;font-size:14px;font-weight:bold;margin-bottom:6px;}
+.metric-number{font-size:22px;font-weight:bold;}
+.progress-bg{width:100%;background:#222;height:6px;border-radius:4px;}
+.progress-bar{height:6px;border-radius:4px;}
+.sla-badge{position:fixed;top:12px;right:12px;background:black;color:red;padding:6px 10px;border-radius:8px;font-size:15px;cursor:pointer;}
 </style>
-"""
+""", unsafe_allow_html=True)
 
-st.markdown(APP_CSS, unsafe_allow_html=True)
+# ---------- DATE RANGE SELECTOR ----------
+_, date_col = st.columns([7,3])
+with date_col:
+    st.markdown("#### Select Timeline")
+    range_type = st.selectbox("", ["Today","Last 7 Days","Last 30 Days","Custom"])
+    if range_type=="Custom":
+        sd = st.date_input("Start", date.today())
+        ed = st.date_input("End", date.today())
+    elif range_type=="Last 7 Days":
+        sd = date.today() - timedelta(days=7)
+        ed = date.today()
+    elif range_type=="Last 30 Days":
+        sd = date.today() - timedelta(days=30)
+        ed = date.today()
+    else:
+        sd = date.today()
+        ed = date.today()
 
-# ----------------------------
-# Database helpers
-# ----------------------------
+# ---------- LEAD CAPTURE ----------
+with st.expander("➕ New Lead"):
+    name = st.text_input("Name")
+    phone = st.text_input("Phone")
+    email = st.text_input("Email")
+    address = st.text_input("Address")
+    platforms = ["Google Ads","Facebook","Instagram","TikTok","LinkedIn","Twitter","YouTube","Referral","Walk-In","Hotline","Website"]
+    src = st.selectbox("Source", platforms)
+    cost = st.number_input("Cost to Acquire Lead ($)", min_value=0.0, step=1.0, value=0.0)
 
-def get_conn() -> Connection:
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    return conn
-
-def init_db():
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS leads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            lead_id TEXT UNIQUE,
-            created_at TEXT,
-            source TEXT,
-            stage TEXT,
-            estimated_value REAL,
-            ad_cost REAL,
-            converted INTEGER,
-            notes TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# ----------------------------
-# CRUD & Lead Capture
-# ----------------------------
-
-def insert_leads(df: pd.DataFrame):
-    conn = get_conn()
-    df = df.copy()
-    df['created_at'] = pd.to_datetime(df['created_at']).astype(str)
-    rows = df[['lead_id','created_at','source','stage','estimated_value','ad_cost','converted','notes']].fillna('').values.tolist()
-    c = conn.cursor()
-    for r in rows:
+    if st.button("Save Lead"):
+        s = SessionLocal()
         try:
-            c.execute('''INSERT OR IGNORE INTO leads (lead_id,created_at,source,stage,estimated_value,ad_cost,converted,notes) VALUES (?,?,?,?,?,?,?,?)''', r)
-        except Exception as e:
-            print('Insert error', e)
-    conn.commit()
-    conn.close()
+            new = Lead(name=name, phone=phone, email=email, address=address, source=src, cost_to_acquire=cost, status="CAPTURED")
+            s.add(new)
+            s.commit()
+            st.success("✅ Lead Saved")
+        except Exception:
+            s.rollback()
+            st.error("Save failed")
+        finally:
+            s.close()
 
-def upsert_lead(row: dict):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute('''INSERT INTO leads (lead_id,created_at,source,stage,estimated_value,ad_cost,converted,notes)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(lead_id) DO UPDATE SET
-                 created_at=excluded.created_at, source=excluded.source, stage=excluded.stage,
-                 estimated_value=excluded.estimated_value, ad_cost=excluded.ad_cost, converted=excluded.converted, notes=excluded.notes
-    ''', (row['lead_id'], row['created_at'], row['source'], row['stage'], row['estimated_value'], row['ad_cost'], row['converted'], row.get('notes','')))
-    conn.commit()
-    conn.close()
+# ---------- KPI CARDS ----------
+def get_kpi():
+    s = SessionLocal()
+    try:
+        rows = s.query(Lead).filter(
+            Lead.created_at >= datetime.combine(sd, datetime.min.time()),
+            Lead.created_at <= datetime.combine(sd, datetime.min.time()) + timedelta(days=1)
+        ).all()
 
-def delete_lead(lead_id: str):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute('DELETE FROM leads WHERE lead_id=?', (lead_id,))
-    conn.commit()
-    conn.close()
+        active = len(rows)
+        won = len([r for r in rows if r.status=="AWARDED" or r.converted])
+        spend = sum(r.cost_to_acquire or 0 for r in rows)
+        cpa = (spend/won) if won>0 else 0
+        roi = won * 3800
 
-# ----------------------------
-# Mock data seeding
-# ----------------------------
+        return active, won, round(cpa,2), roi, spend
+    finally:
+        s.close()
 
-def generate_mock_leads_df(n=300):
-    rng = np.random.default_rng(42)
-    created = [ (datetime.now() - timedelta(days=int(x))).isoformat() for x in rng.integers(0,120,size=n) ]
-    sources = rng.choice(['Google Ads','Organic','Referral','Facebook Ads','Direct','Partner'], size=n)
-    stages = rng.choice(PIPELINE_STAGES, size=n, p=[0.18,0.25,0.2,0.15,0.12,0.1])
-    est_value = np.round(rng.normal(2500,1800,size=n).clip(200,25000),2)
-    cost = np.round(rng.normal(55,35,size=n).clip(0,800),2)
-    lead_id = [f"L{200000+i}" for i in range(n)]
-    converted = np.where(stages=='Won',1,0)
-    df = pd.DataFrame({'lead_id':lead_id,'created_at':created,'source':sources,'stage':stages,'estimated_value':est_value,'ad_cost':cost,'converted':converted,'notes':''})
-    return df
+a,w,c,r,s = get_kpi()
 
-if pd.read_sql('SELECT COUNT(*) as cnt FROM leads', get_conn()).loc[0,'cnt']==0:
-    seed = generate_mock_leads_df(300)
-    insert_leads(seed)
+kpis = [
+  ("ACTIVE LEADS",a,"red"),
+  ("SLA SUCCESS",random.randint(70,100),"blue"),
+  ("QUALIFICATION RATE",random.randint(30,100),"orange"),
+  ("CONVERSION RATE",random.randint(10,100),"green"),
+  ("INSPECTION BOOKED",random.randint(1,20),"cyan"),
+  ("ESTIMATE SENT",random.randint(1,12),"yellow"),
+  ("PIPELINE JOB VALUES ($)",f"{c:,.0f}","chartreuse")
+]
 
-# ----------------------------
-# Utility helpers
-# ----------------------------
+st.markdown("## TOTAL LEAD PIPELINE KEY PERFORMANCE INDICATOR")
+st.markdown("*Overview of your pipeline health and sales performance.*")
 
-def to_dataframe(sql: str, params=()):
-    conn = get_conn()
-    df = pd.read_sql_query(sql, conn, params=params)
-    conn.close()
-    return df
+r1,r2 = kpis[:4],kpis[4:]
+for row in [r1,r2]:
+    cols = st.columns(len(row))
+    for col,(t,v,color) in zip(cols,row):
+        col.markdown(f"""
+        <div class='metric-card'>
+           <div class='metric-title'>{t}</div>
+           <div class='metric-number' style='color:{color};'>{v}</div>
+           <div class='progress-bg'><div class='progress-bar' style='width:{random.randint(25,80)}%; background:{color};'></div></div>
+        </div>
+        """, unsafe_allow_html=True)
 
-def download_link(df: pd.DataFrame, filename: str):
-    towrite = io.BytesIO()
-    df.to_excel(towrite, index=False, engine='openpyxl')
-    towrite.seek(0)
-    b64 = base64.b64encode(towrite.read()).decode()
-    href = f'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}'
-    return f'<a href="{href}" download="{filename}">Download {filename}</a>'
+# ---------- SLA OVERDUE CHART + TABLE ----------
+st.markdown("---")
+st.markdown("### 🚨 SLA / Overdue Leads")
+st.markdown("*Track SLA breaches and overdue trends over time.*")
 
-# ----------------------------
-# Model helpers
-# ----------------------------
-
-def train_model(df: pd.DataFrame):
-    df2 = df.copy()
-    df2['created_at'] = pd.to_datetime(df2['created_at'])
-    df2['age_days'] = (datetime.now() - df2['created_at']).dt.days
-    X = pd.get_dummies(df2[['source','stage']].astype(str))
-    X['ad_cost'] = df2['ad_cost']
-    X['estimated_value'] = df2['estimated_value']
-    X['age_days'] = df2['age_days']
-    y = df2['converted']
-    if len(y.unique())==1:
-        return None, None
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
-    preds = model.predict(X_test)
-    acc = accuracy_score(y_test, preds)
-    joblib.dump({'model': model, 'columns': X.columns.tolist()}, 'titan_lead_scoring.joblib')
-    return model, acc
-
-def load_model():
-    if os.path.exists('titan_lead_scoring.joblib'):
-        obj = joblib.load('titan_lead_scoring.joblib')
-        return obj['model'], obj['columns']
-    return None, None
-
-# ----------------------------
-# Sidebar
-# ----------------------------
-
-st.sidebar.title('TITAN Control Panel')
-page = st.sidebar.selectbox('Choose page', ['Dashboard','Leads','CPA','ML Lead Scoring','Imports/Exports','Settings','Reports'])
-
-# ----------------------------
-# Pages
-# ----------------------------
-
-def page_dashboard():
-    st.markdown("<div class='header'><h1>📊 TOTAL LEAD PIPELINE KPI</h1></div>", unsafe_allow_html=True)
-    st.markdown("*\_Snapshot of leads and conversion across pipeline stages_*")
-    df = to_dataframe('SELECT * FROM leads')
-    total_leads = len(df)
-    new_leads = (df['stage']=='New').sum()
-    contacted = (df['stage']=='Contacted').sum()
-    conv_rate = df['converted'].mean() if total_leads>0 else 0
-    c1,c2,c3,c4 = st.columns(4)
-    c1.markdown(f"<div class='metric-card'><div class='kpi'>{total_leads}</div><div class='small'>Total leads</div></div>", unsafe_allow_html=True)
-    c2.markdown(f"<div class='metric-card'><div class='kpi'>{new_leads}</div><div class='small'>New leads</div></div>", unsafe_allow_html=True)
-    c3.markdown(f"<div class='metric-card'><div class='kpi'>{contacted}</div><div class='small'>Contacted</div></div>", unsafe_allow_html=True)
-    c4.markdown(f"<div class='metric-card'><div class='kpi'>{conv_rate*100:.1f}%</div><div class='small'>Conversion rate</div></div>", unsafe_allow_html=True)
-
-    st.subheader('Pipeline stages')
-    stage_counts = df['stage'].value_counts().reindex(PIPELINE_STAGES, fill_value=0).reset_index()
-    stage_counts.columns = ['stage','count']
-    st.bar_chart(stage_counts.set_index('stage')['count'])
-
-    st.subheader('Recent Leads')
-    st.dataframe(df.sort_values('created_at', ascending=False).head(20))
-
-
-def page_leads():
-    st.header('Lead Capture & Management')
-    df = to_dataframe('SELECT * FROM leads')
-    with st.form('lead_form'):
-        lead_id = st.text_input('Lead ID (unique)')
-        source = st.selectbox('Source',['Google Ads','Organic','Referral','Facebook Ads','Direct','Partner','Other'])
-        stage = st.selectbox('Pipeline Stage', PIPELINE_STAGES)
-        est_val = st.number_input('Estimated Value', value=0.0)
-        ad_cost = st.number_input('Ad Cost', value=0.0)
-        converted = st.checkbox('Converted')
-        notes = st.text_area('Notes')
-        submitted = st.form_submit_button('Save Lead')
-        if submitted:
-            if not lead_id:
-                st.error('Lead ID required')
-            else:
-                upsert_lead({'lead_id':lead_id,'created_at':datetime.now().isoformat(),'source':source,'stage':stage,'estimated_value':est_val,'ad_cost':ad_cost,'converted':int(converted),'notes':notes})
-                st.success('Lead captured')
-    st.subheader('Filter & Export')
-    src_filter = st.multiselect('Filter by Source', df['source'].unique(), default=df['source'].unique())
-    stg_filter = st.multiselect('Filter by Stage', PIPELINE_STAGES, default=PIPELINE_STAGES)
-    filtered = df[(df['source'].isin(src_filter)) & (df['stage'].isin(stg_filter))]
-    st.dataframe(filtered)
-    if st.button('Export Filtered Leads'):
-        st.markdown(download_link(filtered, 'filtered_leads.xlsx'), unsafe_allow_html=True)
-
-# Route pages
-if page == 'Dashboard':
-    page_dashboard()
-elif page == 'Leads':
-    page_leads()
-# CPA, ML, Imports/Exports, Settings, Reports pages remain as before (unchanged)
+s = SessionLocal()
+try:
+    sla = s.query(Lead.id,Lead.name,Lead.phone,Lead.created_at).filter(Lead.status=="OVERDUE").all()
+finally:
+    s.close()
+df = pd.DataFrame([{"Name":x.name,"Phone":x.phone,"Created":x.created_at} for x in sla])
+import matplotlib.pyplot as plt
+plt.plot([len(df) for _ in range(len(df))])
+st.pyplot(plt)
+st.dataframe(df)
