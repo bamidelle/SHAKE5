@@ -310,6 +310,14 @@ body, .stApp { background: var(--bg); color: var(--text); font-family: 'Comforta
 .badge { background:var(--danger); color:#fff; border-radius:999px; padding:2px 8px; font-size:12px; margin-left:8px; }
 """
 st.markdown(f"<style>{APP_CSS}</style>", unsafe_allow_html=True)
+# TOP-RIGHT DATE + BELL HEADER
+col1, col2 = st.columns([8, 2])
+with col2:
+    st.markdown(
+        f"<div style='text-align:right;font-size:14px;margin-top:6px'>📅 {date.today().strftime('%Y-%m-%d')}</div>",
+        unsafe_allow_html=True
+    )
+    alerts_bell()
 
 # --------------------------
 # Sidebar controls
